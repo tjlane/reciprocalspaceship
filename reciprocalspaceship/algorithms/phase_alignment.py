@@ -11,6 +11,9 @@ from numpy.typing import ArrayLike, NDArray
 from scipy.fft import next_fast_len
 from scipy.optimize import OptimizeResult, minimize
 
+from ..decorators import spacegroupify
+from ..utils.phases import canonicalize_phases
+
 if TYPE_CHECKING:
     from typing_extensions import TypeAlias
 
@@ -40,19 +43,6 @@ class PhaseAlignmentInputError(ValueError):
 
 class PhaseAlignmentOptimizationError(RuntimeError):
     """Raised when continuous phase alignment does not converge."""
-
-
-def _coerce_spacegroup(spacegroup: SpaceGroupLike) -> gemmi.SpaceGroup:
-    if isinstance(spacegroup, gemmi.SpaceGroup):
-        return spacegroup
-    if not isinstance(spacegroup, (str, int)):
-        msg = f"spacegroup must be a string, integer, or gemmi.SpaceGroup; got {type(spacegroup)}"
-        raise PhaseAlignmentInputError(msg)
-    try:
-        return gemmi.SpaceGroup(spacegroup)
-    except ValueError as error:
-        msg = f"could not construct a space group from {spacegroup!r}"
-        raise PhaseAlignmentInputError(msg) from error
 
 
 def _validate_miller_indices(miller_indices: ArrayLike) -> IntegerArray:
@@ -316,6 +306,7 @@ def _continuous_translation(
     return best_translation
 
 
+@spacegroupify
 def align_phases(
     miller_indices: ArrayLike,
     phases: ArrayLike,
@@ -381,7 +372,10 @@ def align_phases(
         number_of_phases=number_of_reflections,
     )
     normalized_weights = validated_weights / np.sum(validated_weights)
-    validated_spacegroup = _coerce_spacegroup(spacegroup)
+    if not isinstance(spacegroup, gemmi.SpaceGroup):
+        msg = f"spacegroup could not be converted to gemmi.SpaceGroup; got {spacegroup!r}"
+        raise PhaseAlignmentInputError(msg)
+    validated_spacegroup = spacegroup
     rotation_constraints = _rotation_constraints(validated_spacegroup)
     polar_basis = _polar_basis(rotation_constraints)
     allowed_grid_origins = _allowed_grid_origins(
@@ -389,7 +383,7 @@ def align_phases(
         rotation_constraints,
     )
     phase_differences = np.deg2rad(
-        validated_phases - validated_reference_phases,
+        canonicalize_phases(validated_phases - validated_reference_phases),
     )
 
     if polar_basis.shape[1] == 0:
@@ -415,11 +409,10 @@ def align_phases(
             normalized_weights,
         )
 
-    aligned_phases = (
+    aligned_phases = canonicalize_phases(
         validated_phases
         + FULL_ROTATION_DEGREES * validated_miller_indices @ fractional_translation
-        + FULL_ROTATION_DEGREES / 2.0
-    ) % FULL_ROTATION_DEGREES - FULL_ROTATION_DEGREES / 2.0
+    )
     return (
         np.asarray(aligned_phases, dtype=np.float64),
         np.asarray(fractional_translation, dtype=np.float64),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Union
 
 import gemmi
 import numpy as np
@@ -201,6 +201,24 @@ def test_align_phases_uses_weights_for_p1() -> None:
         expected_translation,
         atol=2e-4,
     )
+
+
+@pytest.mark.parametrize("spacegroup", [1, "P 1", gemmi.SpaceGroup(1)])
+def test_align_phases_accepts_spacegroup_types(
+    spacegroup: Union[str, int, gemmi.SpaceGroup],
+) -> None:
+    miller_indices = np.eye(3, dtype=np.int64)
+    phases = np.zeros(3, dtype=np.float64)
+
+    aligned_phases, fractional_translation = rs.algorithms.align_phases(
+        miller_indices,
+        phases,
+        phases,
+        spacegroup,
+    )
+
+    np.testing.assert_allclose(aligned_phases, phases, atol=1e-12)
+    np.testing.assert_allclose(fractional_translation, 0.0, atol=1e-12)
 
 
 def test_align_phases_rejects_invalid_inputs() -> None:
