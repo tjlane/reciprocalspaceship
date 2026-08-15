@@ -11,7 +11,6 @@ from numpy.typing import NDArray
 
 import reciprocalspaceship as rs
 
-
 PHASE_DATA_DIRECTORY: Final[Path] = Path(__file__).parents[1] / "data" / "fmodel"
 FULL_ROTATION_DEGREES: Final[float] = 360.0
 
@@ -36,7 +35,9 @@ def _translated_phases(
     fractional_translation: FloatArray,
 ) -> FloatArray:
     phase_shifts = FULL_ROTATION_DEGREES * miller_indices @ fractional_translation
-    return np.asarray(rs.utils.canonicalize_phases(phases + phase_shifts), dtype=np.float64)
+    return np.asarray(
+        rs.utils.canonicalize_phases(phases + phase_shifts), dtype=np.float64
+    )
 
 
 def _load_phase_alignment_case(
@@ -76,7 +77,9 @@ def p61_polar_case() -> PhaseAlignmentCase:
 def r3r_polar_case() -> PhaseAlignmentCase:
     random_number_generator = np.random.default_rng(seed=20260814)
     miller_indices = random_number_generator.integers(low=-8, high=9, size=(2_000, 3))
-    reference_phases = random_number_generator.uniform(low=-180.0, high=180.0, size=2_000)
+    reference_phases = random_number_generator.uniform(
+        low=-180.0, high=180.0, size=2_000
+    )
     expected_translation = np.asarray((0.137, 0.137, 0.137), dtype=np.float64)
     phases = _translated_phases(
         miller_indices,
@@ -116,7 +119,9 @@ def test_align_phases_smoke(
     assert aligned_phases.shape == case.phases.shape
     assert fractional_translation.shape == (3,)
     assert np.logical_and(aligned_phases >= -180.0, aligned_phases < 180.0).all()
-    np.testing.assert_allclose(fractional_translation, case.expected_translation, atol=1e-6)
+    np.testing.assert_allclose(
+        fractional_translation, case.expected_translation, atol=1e-6
+    )
     phase_residuals = rs.utils.canonicalize_phases(
         aligned_phases - case.reference_phases
     )

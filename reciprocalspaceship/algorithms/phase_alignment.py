@@ -11,8 +11,8 @@ from numpy.typing import ArrayLike, NDArray
 from scipy.fft import next_fast_len
 from scipy.optimize import OptimizeResult, minimize
 
-from ..decorators import spacegroupify
-from ..utils.phases import canonicalize_phases
+from reciprocalspaceship.decorators import spacegroupify
+from reciprocalspaceship.utils.phases import canonicalize_phases
 
 if TYPE_CHECKING:
     from typing_extensions import TypeAlias
@@ -95,7 +95,9 @@ def _validate_weights(
         msg = "weights must contain numeric values"
         raise PhaseAlignmentInputError(msg) from error
     if weights_array.shape != (number_of_phases,):
-        msg = f"weights must have shape ({number_of_phases},); got {weights_array.shape}"
+        msg = (
+            f"weights must have shape ({number_of_phases},); got {weights_array.shape}"
+        )
         raise PhaseAlignmentInputError(msg)
     if not np.isfinite(weights_array).all():
         msg = "weights must contain only finite values"
@@ -112,7 +114,8 @@ def _validate_weights(
 def _rotation_constraints(spacegroup: gemmi.SpaceGroup) -> IntegerArray:
     identity_rotation = np.eye(NUMBER_OF_CRYSTALLOGRAPHIC_AXES, dtype=np.int64)
     constraints = [
-        identity_rotation - np.asarray(operation.rot, dtype=np.int64) // ORIGIN_DENOMINATOR
+        identity_rotation
+        - np.asarray(operation.rot, dtype=np.int64) // ORIGIN_DENOMINATOR
         for operation in spacegroup.operations().sym_ops
     ]
     return np.concatenate(constraints, axis=0)
@@ -131,10 +134,14 @@ def _allowed_grid_origins(
     spacegroup: gemmi.SpaceGroup,
     rotation_constraints: IntegerArray,
 ) -> FloatArray:
-    grid_coordinates = np.indices(
-        (ORIGIN_DENOMINATOR,) * NUMBER_OF_CRYSTALLOGRAPHIC_AXES,
-        dtype=np.int64,
-    ).reshape(NUMBER_OF_CRYSTALLOGRAPHIC_AXES, -1).T
+    grid_coordinates = (
+        np.indices(
+            (ORIGIN_DENOMINATOR,) * NUMBER_OF_CRYSTALLOGRAPHIC_AXES,
+            dtype=np.int64,
+        )
+        .reshape(NUMBER_OF_CRYSTALLOGRAPHIC_AXES, -1)
+        .T
+    )
     centering_translations = (
         np.asarray(spacegroup.operations().cen_ops, dtype=np.int64) % ORIGIN_DENOMINATOR
     )
@@ -213,7 +220,9 @@ def _candidate_translations(
         periodic_grid_origins[row_indices, closest_periodic_images]
         + polar_components[row_indices, closest_periodic_images]
     ) % 1.0
-    rounded_translations = np.round(translations, decimals=TRANSLATION_ROUNDING_DECIMALS)
+    rounded_translations = np.round(
+        translations, decimals=TRANSLATION_ROUNDING_DECIMALS
+    )
     return np.unique(rounded_translations, axis=0)
 
 
@@ -231,9 +240,7 @@ def _refine_translation(
         )
         weighted_sines = normalized_weights * np.sin(residuals)
         loss = float(normalized_weights @ (1.0 - np.cos(residuals)))
-        translation_gradient = (
-            FULL_ROTATION_RADIANS * miller_indices.T @ weighted_sines
-        )
+        translation_gradient = FULL_ROTATION_RADIANS * miller_indices.T @ weighted_sines
         polar_gradient = polar_basis.T @ translation_gradient
         return loss, np.asarray(polar_gradient, dtype=np.float64)
 
@@ -373,7 +380,9 @@ def align_phases(
     )
     normalized_weights = validated_weights / np.sum(validated_weights)
     if not isinstance(spacegroup, gemmi.SpaceGroup):
-        msg = f"spacegroup could not be converted to gemmi.SpaceGroup; got {spacegroup!r}"
+        msg = (
+            f"spacegroup could not be converted to gemmi.SpaceGroup; got {spacegroup!r}"
+        )
         raise PhaseAlignmentInputError(msg)
     validated_spacegroup = spacegroup
     rotation_constraints = _rotation_constraints(validated_spacegroup)
