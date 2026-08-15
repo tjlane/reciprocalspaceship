@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Union
+from typing import Final, Optional, Union, cast
 
 import gemmi
 import numpy as np
 import pytest
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
+from scipy.optimize import OptimizeResult
 
 import reciprocalspaceship as rs
 
@@ -27,6 +28,19 @@ class PhaseAlignmentCase:
     reference_phases: FloatArray
     spacegroup: gemmi.SpaceGroup
     expected_translation: FloatArray
+
+
+@dataclass(frozen=True)
+class InvalidPhaseAlignmentCase:
+    """Inputs for a phase-alignment validation test."""
+
+    name: str
+    message: str
+    miller_indices: ArrayLike = ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+    phases: ArrayLike = (10.0, 20.0, 30.0)
+    reference_phases: ArrayLike = (10.0, 20.0, 30.0)
+    spacegroup: Union[str, int, gemmi.SpaceGroup] = "P 1"
+    weights: Optional[ArrayLike] = None
 
 
 def _translated_phases(
@@ -226,51 +240,135 @@ def test_align_phases_accepts_spacegroup_types(
     np.testing.assert_allclose(fractional_translation, 0.0, atol=1e-12)
 
 
-def test_align_phases_rejects_invalid_inputs() -> None:
-    miller_indices = np.asarray(((1, 0, 0), (0, 1, 0), (0, 0, 1)))
-    phases = np.asarray((10.0, 20.0, 30.0))
-    spacegroup = gemmi.SpaceGroup("P 1")
-
-    with pytest.raises(rs.algorithms.PhaseAlignmentInputError, match="shape"):
+@pytest.mark.parametrize(
+    "case",
+    [
+        InvalidPhaseAlignmentCase(
+            "miller-shape",
+            "shape",
+            miller_indices=((1, 0), (0, 1), (0, 0)),
+        ),
+        InvalidPhaseAlignmentCase(
+            "miller-nonnumeric",
+            "integer-valued numbers",
+            miller_indices=(("bad", 0, 0), (0, 1, 0), (0, 0, 1)),
+        ),
+        InvalidPhaseAlignmentCase(
+            "miller-nonfinite",
+            "finite",
+            miller_indices=((np.nan, 0, 0), (0, 1, 0), (0, 0, 1)),
+        ),
+        InvalidPhaseAlignmentCase(
+            "miller-noninteger",
+            "integer-valued entries",
+            miller_indices=((0.5, 0, 0), (0, 1, 0), (0, 0, 1)),
+        ),
+        InvalidPhaseAlignmentCase(
+            "phase-nonnumeric",
+            "numeric values",
+            phases=("bad", 20.0, 30.0),
+        ),
+        InvalidPhaseAlignmentCase(
+            "phase-shape",
+            "shape",
+            phases=((10.0, 20.0, 30.0),),
+        ),
+        InvalidPhaseAlignmentCase(
+            "phase-nonfinite",
+            "finite",
+            phases=(10.0, np.nan, 30.0),
+        ),
+        InvalidPhaseAlignmentCase(
+            "weight-nonnumeric",
+            "numeric values",
+            weights=("bad", 1.0, 1.0),
+        ),
+        InvalidPhaseAlignmentCase(
+            "weight-shape",
+            "shape",
+            weights=(1.0, 1.0),
+        ),
+        InvalidPhaseAlignmentCase(
+            "weight-nonfinite",
+            "finite",
+            weights=(1.0, np.nan, 1.0),
+        ),
+        InvalidPhaseAlignmentCase(
+            "weight-negative",
+            "nonnegative",
+            weights=(1.0, -1.0, 1.0),
+        ),
+        InvalidPhaseAlignmentCase(
+            "weight-zero",
+            "positive",
+            weights=(0.0, 0.0, 0.0),
+        ),
+        InvalidPhaseAlignmentCase(
+            "phase-length",
+            "same length",
+            phases=(10.0, 20.0),
+        ),
+        InvalidPhaseAlignmentCase(
+            "reference-phase-length",
+            "same length",
+            reference_phases=(10.0, 20.0),
+        ),
+        InvalidPhaseAlignmentCase(
+            "empty",
+            "at least one",
+            miller_indices=np.empty((0, 3), dtype=np.int64),
+            phases=(),
+            reference_phases=(),
+        ),
+        InvalidPhaseAlignmentCase(
+            "spacegroup",
+            "could not be converted",
+            spacegroup=cast(Union[str, int, gemmi.SpaceGroup], None),
+        ),
+    ],
+    ids=lambda case: case.name,
+)
+def test_align_phases_rejects_invalid_inputs(
+    case: InvalidPhaseAlignmentCase,
+) -> None:
+    with pytest.raises(rs.algorithms.PhaseAlignmentInputError, match=case.message):
         rs.algorithms.align_phases(
-            miller_indices[:, :2],
-            phases,
-            phases,
-            spacegroup,
+            case.miller_indices,
+            case.phases,
+            case.reference_phases,
+            case.spacegroup,
+            weights=case.weights,
         )
 
-    with pytest.raises(rs.algorithms.PhaseAlignmentInputError, match="same length"):
-        rs.algorithms.align_phases(
-            miller_indices,
-            phases[:-1],
-            phases,
-            spacegroup,
+
+def test_align_phases_raises_when_optimization_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failed_minimize(*_args: object, **_kwargs: object) -> OptimizeResult:
+        return OptimizeResult(
+            success=False,
+            fun=np.inf,
+            jac=np.ones(3, dtype=np.float64),
+            message="forced failure",
         )
 
-    with pytest.raises(rs.algorithms.PhaseAlignmentInputError, match="finite"):
-        rs.algorithms.align_phases(
-            miller_indices,
-            np.asarray((10.0, np.nan, 30.0)),
-            phases,
-            spacegroup,
-        )
+    # Real optimizer failures are platform-dependent; exercise the API boundary directly.
+    monkeypatch.setattr(
+        "reciprocalspaceship.algorithms.phase_alignment.minimize",
+        failed_minimize,
+    )
+    miller_indices = np.eye(3, dtype=np.int64)
+    phases = np.zeros(3, dtype=np.float64)
 
-    with pytest.raises(rs.algorithms.PhaseAlignmentInputError, match="nonnegative"):
+    with pytest.raises(
+        rs.algorithms.PhaseAlignmentOptimizationError,
+        match="forced failure",
+    ):
         rs.algorithms.align_phases(
             miller_indices,
             phases,
             phases,
-            spacegroup,
-            weights=np.asarray((1.0, -1.0, 1.0)),
-        )
-
-    with pytest.raises(rs.algorithms.PhaseAlignmentInputError, match="positive"):
-        rs.algorithms.align_phases(
-            miller_indices,
-            phases,
-            phases,
-            spacegroup,
-            weights=np.zeros(3),
+            gemmi.SpaceGroup("P 1"),
         )
 
 
