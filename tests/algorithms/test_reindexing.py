@@ -8,12 +8,11 @@ import numpy as np
 import pandas as pd
 import pytest
 from numpy.typing import NDArray
-from typing_extensions import TypeAlias
 
 import reciprocalspaceship as rs
 
-FloatArray: TypeAlias = NDArray[np.float64]
-IntegerArray: TypeAlias = NDArray[np.int64]
+FloatArray = NDArray[np.float64]
+IntegerArray = NDArray[np.int64]
 
 SPACEGROUP: Final[gemmi.SpaceGroup] = gemmi.SpaceGroup("P 21 21 2")
 UNIT_CELL: Final[gemmi.UnitCell] = gemmi.UnitCell(30.0, 30.0, 50.0, 90.0, 90.0, 90.0)

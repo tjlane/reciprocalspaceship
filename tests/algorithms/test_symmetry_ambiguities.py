@@ -5,11 +5,10 @@ from typing import Final, Union, cast
 import gemmi
 import numpy as np
 import pytest
-from typing_extensions import TypeAlias
 
 import reciprocalspaceship as rs
 
-SpaceGroupLike: TypeAlias = Union[str, int, gemmi.SpaceGroup]
+SpaceGroupLike = Union[str, int, gemmi.SpaceGroup]
 
 UNIQUE_ORIGIN_SPACEGROUP_NUMBERS: Final[tuple[int, ...]] = (
     197,
