@@ -1,347 +1,212 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Optional, Union, cast
+from typing import Final, Literal
 
 import gemmi
 import numpy as np
 import pytest
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import NDArray
 from scipy.optimize import OptimizeResult
 
 import reciprocalspaceship as rs
 
 PHASE_DATA_DIRECTORY: Final[Path] = Path(__file__).parents[1] / "data" / "fmodel"
 FULL_ROTATION_DEGREES: Final[float] = 360.0
+PERMISSIVE_CORRELATION: Final[float] = -1.0
+PERMISSIVE_CORRELATION_GAP: Final[float] = 0.0
 
 FloatArray = NDArray[np.float64]
 IntegerArray = NDArray[np.int64]
 
 
-@dataclass(frozen=True)
-class PhaseAlignmentCase:
-    """Inputs and expected translation for a phase-alignment test."""
-
-    miller_indices: IntegerArray
-    phases: FloatArray
-    reference_phases: FloatArray
-    spacegroup: gemmi.SpaceGroup
-    expected_translation: FloatArray
-
-
-@dataclass(frozen=True)
-class InvalidPhaseAlignmentCase:
-    """Inputs for a phase-alignment validation test."""
-
-    name: str
-    message: str
-    miller_indices: ArrayLike = ((1, 0, 0), (0, 1, 0), (0, 0, 1))
-    phases: ArrayLike = (10.0, 20.0, 30.0)
-    reference_phases: ArrayLike = (10.0, 20.0, 30.0)
-    spacegroup: Union[str, int, gemmi.SpaceGroup] = "P 1"
-    weights: Optional[ArrayLike] = None
+def _shift_phases(
+    reference: rs.DataSet,
+    origin_shift: tuple[float, float, float],
+    *,
+    phase_key: str = "PHIFMODEL",
+) -> rs.DataSet:
+    moving = reference.copy()
+    phase_shifts = (
+        FULL_ROTATION_DEGREES
+        * moving.get_hkls()
+        @ np.asarray(origin_shift, dtype=np.float64)
+    )
+    moving[phase_key] = rs.utils.canonicalize_phases(
+        moving[phase_key].to_numpy(dtype=np.float64) + phase_shifts
+    ).astype(np.float32)
+    moving[phase_key] = moving[phase_key].astype("Phase")
+    return moving
 
 
-def _translated_phases(
+def _synthetic_dataset(
     miller_indices: IntegerArray,
+    amplitudes: FloatArray,
     phases: FloatArray,
-    fractional_translation: FloatArray,
-) -> FloatArray:
-    phase_shifts = FULL_ROTATION_DEGREES * miller_indices @ fractional_translation
-    return np.asarray(
-        rs.utils.canonicalize_phases(phases + phase_shifts), dtype=np.float64
+    *,
+    spacegroup: gemmi.SpaceGroup,
+    cell: gemmi.UnitCell,
+) -> rs.DataSet:
+    dataset = rs.DataSet(
+        {
+            "H": miller_indices[:, 0],
+            "K": miller_indices[:, 1],
+            "L": miller_indices[:, 2],
+            "F": amplitudes,
+            "PHI": phases,
+        },
+        spacegroup=spacegroup,
+        cell=cell,
+        merged=True,
     )
+    dataset.set_index(["H", "K", "L"], inplace=True)
+    dataset["F"] = dataset["F"].astype("SFAmplitude")
+    dataset["PHI"] = dataset["PHI"].astype("Phase")
+    return dataset
 
 
-def _load_phase_alignment_case(
-    filename: str,
-    expected_translation: tuple[float, float, float],
-) -> PhaseAlignmentCase:
-    dataset = rs.read_mtz(str(PHASE_DATA_DIRECTORY / filename))
-    miller_indices = np.asarray(dataset.get_hkls(), dtype=np.int64)
-    reference_phases = dataset["PHIFMODEL"].to_numpy(dtype=np.float64)
-    translation = np.asarray(expected_translation, dtype=np.float64)
-    phases = _translated_phases(miller_indices, reference_phases, -translation)
-    return PhaseAlignmentCase(
-        miller_indices=miller_indices,
-        phases=phases,
-        reference_phases=reference_phases,
-        spacegroup=dataset.spacegroup,
-        expected_translation=translation,
-    )
-
-
-@pytest.fixture(scope="session")
-def p43212_case() -> PhaseAlignmentCase:
-    return _load_phase_alignment_case("9LYZ.mtz", (0.5, 0.5, 0.5))
-
-
-@pytest.fixture(scope="session")
-def p212121_case() -> PhaseAlignmentCase:
-    return _load_phase_alignment_case("3KXE.mtz", (0.5, 0.0, 0.5))
-
-
-@pytest.fixture(scope="session")
-def p61_polar_case() -> PhaseAlignmentCase:
-    return _load_phase_alignment_case("6OVT.mtz", (0.0, 0.0, 0.137))
-
-
-@pytest.fixture(scope="session")
-def r3r_polar_case() -> PhaseAlignmentCase:
-    random_number_generator = np.random.default_rng(seed=20260814)
-    miller_indices = random_number_generator.integers(low=-8, high=9, size=(2_000, 3))
-    reference_phases = random_number_generator.uniform(
-        low=-180.0, high=180.0, size=2_000
-    )
-    expected_translation = np.asarray((0.137, 0.137, 0.137), dtype=np.float64)
-    phases = _translated_phases(
-        miller_indices,
-        reference_phases,
-        -expected_translation,
-    )
-    return PhaseAlignmentCase(
-        miller_indices=miller_indices,
-        phases=phases,
-        reference_phases=reference_phases,
-        spacegroup=gemmi.SpaceGroup("R 3:R"),
-        expected_translation=expected_translation,
+def _align(
+    moving: rs.DataSet,
+    reference: rs.DataSet,
+    *,
+    phase_key: str = "PHIFMODEL",
+    reference_phase_key: str = "PHIFMODEL",
+    amplitude_key: str = "FMODEL",
+    reference_amplitude_key: str = "FMODEL",
+    weighting: Literal["amplitude", "uniform"] = "amplitude",
+) -> rs.algorithms.PhaseAlignmentResult:
+    return rs.algorithms.align_phases(
+        moving,
+        reference,
+        phase_key=phase_key,
+        reference_phase_key=reference_phase_key,
+        amplitude_key=amplitude_key,
+        reference_amplitude_key=reference_amplitude_key,
+        weighting=weighting,
+        warning_correlation=PERMISSIVE_CORRELATION,
+        minimum_correlation=PERMISSIVE_CORRELATION,
+        minimum_correlation_gap=PERMISSIVE_CORRELATION_GAP,
     )
 
 
 @pytest.mark.parametrize(
-    "case_fixture_name",
-    ["p43212_case", "p212121_case", "p61_polar_case", "r3r_polar_case"],
+    ("filename", "expected_origin_shift"),
+    [
+        ("9LYZ.mtz", (-0.5, -0.5, -0.5)),
+        ("3KXE.mtz", (-0.5, 0.0, -0.5)),
+        ("6OVT.mtz", (0.0, 0.0, -0.137)),
+    ],
 )
-def test_align_phases_smoke(
-    case_fixture_name: str,
-    request: pytest.FixtureRequest,
+def test_align_phases_real_spacegroup_cases(
+    filename: str,
+    expected_origin_shift: tuple[float, float, float],
 ) -> None:
-    case: PhaseAlignmentCase = request.getfixturevalue(case_fixture_name)
+    reference = rs.read_mtz(str(PHASE_DATA_DIRECTORY / filename))
+    moving = _shift_phases(reference, expected_origin_shift)
 
-    aligned_phases, fractional_translation = rs.algorithms.align_phases(
-        case.miller_indices,
-        case.phases,
-        case.reference_phases,
-        case.spacegroup,
-    )
-
-    assert isinstance(aligned_phases, np.ndarray)
-    assert isinstance(fractional_translation, np.ndarray)
-    assert aligned_phases.dtype == np.float64
-    assert fractional_translation.dtype == np.float64
-    assert aligned_phases.shape == case.phases.shape
-    assert fractional_translation.shape == (3,)
-    assert np.logical_and(aligned_phases >= -180.0, aligned_phases < 180.0).all()
-    np.testing.assert_allclose(
-        fractional_translation, case.expected_translation, atol=1e-6
-    )
-    phase_residuals = rs.utils.canonicalize_phases(
-        aligned_phases - case.reference_phases
-    )
-    np.testing.assert_allclose(phase_residuals, 0.0, atol=1e-5)
-
-
-def test_align_phases_snaps_nonpolar_origin_with_noise(
-    p43212_case: PhaseAlignmentCase,
-) -> None:
-    # Regression: noise must not move a nonpolar fit away from an allowed origin.
-    random_number_generator = np.random.default_rng(seed=20260814)
-    noisy_phases = rs.utils.canonicalize_phases(
-        p43212_case.phases
-        + random_number_generator.normal(
-            loc=0.0,
-            scale=10.0,
-            size=len(p43212_case.phases),
-        )
-    )
-
-    _, fractional_translation = rs.algorithms.align_phases(
-        p43212_case.miller_indices,
-        noisy_phases,
-        p43212_case.reference_phases,
-        p43212_case.spacegroup,
-    )
+    result = _align(moving, reference)
 
     np.testing.assert_allclose(
-        fractional_translation,
-        p43212_case.expected_translation,
-        atol=1e-12,
+        result.origin_shift,
+        expected_origin_shift,
+        atol=1e-6,
     )
+    np.testing.assert_allclose(result.correlation, 1.0, atol=1e-10)
 
 
-def test_align_phases_uses_weights_for_p1() -> None:
+def test_align_phases_oblique_rhombohedral_polar_axis() -> None:
     random_number_generator = np.random.default_rng(seed=20260814)
-    number_of_reliable_reflections = 1_200
-    number_of_unreliable_reflections = 1_800
-    number_of_reflections = (
-        number_of_reliable_reflections + number_of_unreliable_reflections
+    spacegroup = gemmi.SpaceGroup("R 3:R")
+    cell = gemmi.UnitCell(50.0, 50.0, 50.0, 75.0, 75.0, 75.0)
+    candidate_indices = np.mgrid[-8:9, -8:9, -8:9].reshape(3, -1).T
+    present = ~rs.utils.is_absent(candidate_indices, spacegroup)
+    in_asu = rs.utils.in_asu(candidate_indices, spacegroup)
+    miller_indices = np.asarray(
+        candidate_indices[present & in_asu][:800],
+        dtype=np.int64,
     )
-    miller_indices = random_number_generator.integers(
-        low=-12,
-        high=13,
-        size=(number_of_reflections, 3),
+    amplitudes = random_number_generator.lognormal(
+        mean=3.0,
+        sigma=0.7,
+        size=len(miller_indices),
     )
     reference_phases = random_number_generator.uniform(
         low=-180.0,
         high=180.0,
-        size=number_of_reflections,
+        size=len(miller_indices),
     )
-    expected_translation = np.asarray((0.173, 0.419, 0.731), dtype=np.float64)
-    incorrect_translation = np.asarray((0.625, 0.125, 0.375), dtype=np.float64)
-    phases = _translated_phases(
+    expected_origin_shift = (-0.137, -0.137, -0.137)
+    reference = _synthetic_dataset(
         miller_indices,
+        amplitudes,
         reference_phases,
-        -incorrect_translation,
+        spacegroup=spacegroup,
+        cell=cell,
     )
-    phases[:number_of_reliable_reflections] = _translated_phases(
-        miller_indices[:number_of_reliable_reflections],
-        reference_phases[:number_of_reliable_reflections],
-        -expected_translation,
-    )
-    phases[:number_of_reliable_reflections] += random_number_generator.normal(
-        loc=0.0,
-        scale=5.0,
-        size=number_of_reliable_reflections,
-    )
-    weights = np.zeros(number_of_reflections, dtype=np.float64)
-    weights[:number_of_reliable_reflections] = 1.0
+    moving = _shift_phases(reference, expected_origin_shift, phase_key="PHI")
 
-    _, fractional_translation = rs.algorithms.align_phases(
-        miller_indices,
-        phases,
-        reference_phases,
-        gemmi.SpaceGroup("P 1"),
-        weights=weights,
+    result = _align(
+        moving,
+        reference,
+        phase_key="PHI",
+        reference_phase_key="PHI",
+        amplitude_key="F",
+        reference_amplitude_key="F",
     )
 
     np.testing.assert_allclose(
-        fractional_translation,
-        expected_translation,
-        atol=2e-4,
+        result.origin_shift,
+        expected_origin_shift,
+        atol=1e-6,
     )
 
 
-@pytest.mark.parametrize("spacegroup", [1, "P 1", gemmi.SpaceGroup(1)])
-def test_align_phases_accepts_spacegroup_types(
-    spacegroup: Union[str, int, gemmi.SpaceGroup],
-) -> None:
-    miller_indices = np.eye(3, dtype=np.int64)
-    phases = np.zeros(3, dtype=np.float64)
+def test_align_phases_snaps_discrete_origin_with_noise() -> None:
+    reference = rs.read_mtz(str(PHASE_DATA_DIRECTORY / "9LYZ.mtz"))
+    expected_origin_shift = (-0.5, -0.5, -0.5)
+    moving = _shift_phases(reference, expected_origin_shift)
+    random_number_generator = np.random.default_rng(seed=20260814)
+    moving["PHIFMODEL"] += random_number_generator.normal(
+        loc=0.0,
+        scale=10.0,
+        size=len(moving),
+    )
 
-    aligned_phases, fractional_translation = rs.algorithms.align_phases(
+    result = _align(moving, reference)
+
+    np.testing.assert_allclose(
+        result.origin_shift,
+        expected_origin_shift,
+        atol=1e-12,
+    )
+
+
+def test_align_phases_rejects_unidentifiable_continuous_origin() -> None:
+    miller_indices = np.asarray(((1, 0, 0), (2, 0, 0), (3, 0, 0)), dtype=np.int64)
+    amplitudes = np.asarray((1.0, 2.0, 3.0), dtype=np.float64)
+    phases = np.asarray((10.0, 20.0, 30.0), dtype=np.float64)
+    spacegroup = gemmi.SpaceGroup("P 1")
+    cell = gemmi.UnitCell(41.0, 53.0, 67.0, 79.0, 83.0, 74.0)
+    reference = _synthetic_dataset(
         miller_indices,
+        amplitudes,
         phases,
-        phases,
-        spacegroup,
+        spacegroup=spacegroup,
+        cell=cell,
     )
 
-    np.testing.assert_allclose(aligned_phases, phases, atol=1e-12)
-    np.testing.assert_allclose(fractional_translation, 0.0, atol=1e-12)
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        InvalidPhaseAlignmentCase(
-            "miller-shape",
-            "shape",
-            miller_indices=((1, 0), (0, 1), (0, 0)),
-        ),
-        InvalidPhaseAlignmentCase(
-            "miller-nonnumeric",
-            "integer-valued numbers",
-            miller_indices=(("bad", 0, 0), (0, 1, 0), (0, 0, 1)),
-        ),
-        InvalidPhaseAlignmentCase(
-            "miller-nonfinite",
-            "finite",
-            miller_indices=((np.nan, 0, 0), (0, 1, 0), (0, 0, 1)),
-        ),
-        InvalidPhaseAlignmentCase(
-            "miller-noninteger",
-            "integer-valued entries",
-            miller_indices=((0.5, 0, 0), (0, 1, 0), (0, 0, 1)),
-        ),
-        InvalidPhaseAlignmentCase(
-            "phase-nonnumeric",
-            "numeric values",
-            phases=("bad", 20.0, 30.0),
-        ),
-        InvalidPhaseAlignmentCase(
-            "phase-shape",
-            "shape",
-            phases=((10.0, 20.0, 30.0),),
-        ),
-        InvalidPhaseAlignmentCase(
-            "phase-nonfinite",
-            "finite",
-            phases=(10.0, np.nan, 30.0),
-        ),
-        InvalidPhaseAlignmentCase(
-            "weight-nonnumeric",
-            "numeric values",
-            weights=("bad", 1.0, 1.0),
-        ),
-        InvalidPhaseAlignmentCase(
-            "weight-shape",
-            "shape",
-            weights=(1.0, 1.0),
-        ),
-        InvalidPhaseAlignmentCase(
-            "weight-nonfinite",
-            "finite",
-            weights=(1.0, np.nan, 1.0),
-        ),
-        InvalidPhaseAlignmentCase(
-            "weight-negative",
-            "nonnegative",
-            weights=(1.0, -1.0, 1.0),
-        ),
-        InvalidPhaseAlignmentCase(
-            "weight-zero",
-            "positive",
-            weights=(0.0, 0.0, 0.0),
-        ),
-        InvalidPhaseAlignmentCase(
-            "phase-length",
-            "same length",
-            phases=(10.0, 20.0),
-        ),
-        InvalidPhaseAlignmentCase(
-            "reference-phase-length",
-            "same length",
-            reference_phases=(10.0, 20.0),
-        ),
-        InvalidPhaseAlignmentCase(
-            "empty",
-            "at least one",
-            miller_indices=np.empty((0, 3), dtype=np.int64),
-            phases=(),
-            reference_phases=(),
-        ),
-        InvalidPhaseAlignmentCase(
-            "spacegroup",
-            "could not be converted",
-            spacegroup=cast(Union[str, int, gemmi.SpaceGroup], None),
-        ),
-    ],
-    ids=lambda case: case.name,
-)
-def test_align_phases_rejects_invalid_inputs(
-    case: InvalidPhaseAlignmentCase,
-) -> None:
-    with pytest.raises(rs.algorithms.PhaseAlignmentInputError, match=case.message):
-        rs.algorithms.align_phases(
-            case.miller_indices,
-            case.phases,
-            case.reference_phases,
-            case.spacegroup,
-            weights=case.weights,
+    with pytest.raises(rs.algorithms.PhaseAlignmentInputError, match="identify"):
+        _align(
+            reference.copy(),
+            reference,
+            phase_key="PHI",
+            reference_phase_key="PHI",
+            amplitude_key="F",
+            reference_amplitude_key="F",
         )
 
 
-def test_align_phases_raises_when_optimization_fails(
+def test_align_phases_raises_when_every_refinement_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def failed_minimize(*_args: object, **_kwargs: object) -> OptimizeResult:
@@ -352,34 +217,92 @@ def test_align_phases_raises_when_optimization_fails(
             message="forced failure",
         )
 
-    # Real optimizer failures are platform-dependent; exercise the API boundary directly.
     monkeypatch.setattr(
         "reciprocalspaceship.algorithms.phase_alignment.minimize",
         failed_minimize,
     )
-    miller_indices = np.eye(3, dtype=np.int64)
-    phases = np.zeros(3, dtype=np.float64)
+    miller_indices = np.asarray(((1, 0, 0), (0, 1, 0), (0, 0, 1)), dtype=np.int64)
+    amplitudes = np.asarray((1.0, 2.0, 3.0), dtype=np.float64)
+    phases = np.asarray((10.0, 20.0, 30.0), dtype=np.float64)
+    spacegroup = gemmi.SpaceGroup("P 1")
+    cell = gemmi.UnitCell(41.0, 53.0, 67.0, 79.0, 83.0, 74.0)
+    reference = _synthetic_dataset(
+        miller_indices,
+        amplitudes,
+        phases,
+        spacegroup=spacegroup,
+        cell=cell,
+    )
 
-    with pytest.raises(
-        rs.algorithms.PhaseAlignmentOptimizationError,
-        match="forced failure",
-    ):
-        rs.algorithms.align_phases(
-            miller_indices,
-            phases,
-            phases,
-            gemmi.SpaceGroup("P 1"),
+    with pytest.raises(rs.algorithms.PhaseAlignmentOptimizationError, match="forced"):
+        _align(
+            reference.copy(),
+            reference,
+            phase_key="PHI",
+            reference_phase_key="PHI",
+            amplitude_key="F",
+            reference_amplitude_key="F",
         )
 
 
-def test_align_phases_rejects_unidentifiable_p1_translation() -> None:
-    miller_indices = np.asarray(((1, 0, 0), (2, 0, 0), (3, 0, 0)))
-    phases = np.asarray((10.0, 20.0, 30.0))
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ("missing-phase", "MISSING"),
+        ("wrong-phase-dtype", "Phase"),
+        ("invalid-weighting", "weighting"),
+        ("one-fom", "both"),
+        ("non-bool-hand", "search_hand"),
+    ],
+)
+def test_align_phases_validates_dataset_interface(change: str, message: str) -> None:
+    reference = rs.read_mtz(str(PHASE_DATA_DIRECTORY / "6OVT.mtz"))
+    moving = reference.copy()
+    kwargs: dict[str, object] = {
+        "phase_key": "PHIFMODEL",
+        "reference_phase_key": "PHIFMODEL",
+        "amplitude_key": "FMODEL",
+        "reference_amplitude_key": "FMODEL",
+    }
+    if change == "missing-phase":
+        kwargs["phase_key"] = "MISSING"
+    elif change == "wrong-phase-dtype":
+        moving["PHIFMODEL"] = moving["PHIFMODEL"].astype("MTZReal")
+    elif change == "invalid-weighting":
+        kwargs["weighting"] = "invalid"
+    elif change == "one-fom":
+        moving["FOM"] = np.ones(len(moving), dtype=np.float32)
+        kwargs["fom_key"] = "FOM"
+    else:
+        kwargs["search_hand"] = 1
 
-    with pytest.raises(rs.algorithms.PhaseAlignmentInputError, match="identify"):
-        rs.algorithms.align_phases(
-            miller_indices,
-            phases,
-            phases,
-            gemmi.SpaceGroup("P 1"),
+    with pytest.raises(rs.algorithms.PhaseAlignmentInputError, match=message):
+        rs.algorithms.align_phases(moving, reference, **kwargs)
+
+
+def test_align_phases_rejects_spacegroup_without_origin_ambiguity() -> None:
+    spacegroup = gemmi.SpaceGroup(199)
+    cell = gemmi.UnitCell(50.0, 50.0, 50.0, 90.0, 90.0, 90.0)
+    candidate_indices = np.mgrid[-3:4, -3:4, -3:4].reshape(3, -1).T
+    present = ~rs.utils.is_absent(candidate_indices, spacegroup)
+    in_asu = rs.utils.in_asu(candidate_indices, spacegroup)
+    miller_indices = np.asarray(candidate_indices[present & in_asu], dtype=np.int64)
+    amplitudes = np.arange(1.0, len(miller_indices) + 1.0)
+    phases = np.zeros(len(miller_indices), dtype=np.float64)
+    reference = _synthetic_dataset(
+        miller_indices,
+        amplitudes,
+        phases,
+        spacegroup=spacegroup,
+        cell=cell,
+    )
+
+    with pytest.raises(rs.algorithms.PhaseAlignmentInputError, match="no origin"):
+        _align(
+            reference.copy(),
+            reference,
+            phase_key="PHI",
+            reference_phase_key="PHI",
+            amplitude_key="F",
+            reference_amplitude_key="F",
         )
