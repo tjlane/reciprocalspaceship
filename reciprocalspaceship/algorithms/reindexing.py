@@ -11,6 +11,11 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from reciprocalspaceship.algorithms._errors import (
+    LowCorrelationWarning,
+    NoClearSolutionError,
+    PhaseAlignmentInputError,
+)
 from reciprocalspaceship.dataset import DataSet
 from reciprocalspaceship.dtypes import (
     AnomalousDifferenceDtype,
@@ -22,12 +27,6 @@ from reciprocalspaceship.dtypes import (
     StandardDeviationFriedelIDtype,
     StandardDeviationFriedelSFDtype,
     StructureFactorAmplitudeDtype,
-)
-
-from ._errors import (
-    LowCorrelationWarning,
-    NoClearSolutionError,
-    PhaseAlignmentInputError,
 )
 
 if TYPE_CHECKING:

@@ -118,9 +118,9 @@ def _synthetic_p1_dataset(
     return dataset.set_index(["H", "K", "L"])
 
 
-def _p61_datasets_with_conflicting_origin_shifts() -> tuple[
-    rs.DataSet, rs.DataSet, BooleanArray
-]:
+def _p61_datasets_with_conflicting_origin_shifts() -> (
+    tuple[rs.DataSet, rs.DataSet, BooleanArray]
+):
     reference = rs.read_mtz(str(PHASE_DATA_DIRECTORY / "6OVT.mtz"))
     moving = reference.copy()
     miller_indices = moving.get_hkls()

@@ -16,17 +16,13 @@ from scipy.fft import next_fast_len
 from scipy.ndimage import maximum_filter
 from scipy.optimize import OptimizeResult, minimize
 
-from reciprocalspaceship.dataset import DataSet
-from reciprocalspaceship.dtypes import IntensityDtype, PhaseDtype, WeightDtype
-from reciprocalspaceship.utils.phases import canonicalize_phases
-
-from ._errors import (
+from reciprocalspaceship.algorithms._errors import (
     LowCorrelationWarning,
     NoClearSolutionError,
     PhaseAlignmentInputError,
     PhaseAlignmentOptimizationError,
 )
-from .reindexing import (
+from reciprocalspaceship.algorithms.reindexing import (
     DEFAULT_MAXIMUM_OBLIQUITY,
     DEFAULT_REINDEXING_MINIMUM_CORRELATION,
     DEFAULT_REINDEXING_MINIMUM_CORRELATION_GAP,
@@ -40,6 +36,9 @@ from .reindexing import (
     _validate_scoring_thresholds,
     has_reindexing_ambiguity,
 )
+from reciprocalspaceship.dataset import DataSet
+from reciprocalspaceship.dtypes import IntensityDtype, PhaseDtype, WeightDtype
+from reciprocalspaceship.utils.phases import canonicalize_phases
 
 if TYPE_CHECKING:
     from typing_extensions import TypeAlias
