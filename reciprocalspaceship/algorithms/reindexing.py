@@ -49,6 +49,14 @@ ANOMALOUS_DTYPES: Final[tuple[type[object], ...]] = (
     StandardDeviationFriedelIDtype,
     StandardDeviationFriedelSFDtype,
 )
+AMPLITUDE_DTYPES: Final[tuple[type[object], ...]] = (
+    StructureFactorAmplitudeDtype,
+    NormalizedStructureFactorAmplitudeDtype,
+)
+REINDEXING_DATA_DTYPES: Final[tuple[type[object], ...]] = (
+    *AMPLITUDE_DTYPES,
+    IntensityDtype,
+)
 
 FloatArray: TypeAlias = NDArray[np.float64]
 
@@ -164,9 +172,7 @@ def has_reindexing_ambiguity(
     _validate_symmetry_metadata(dataset, name="dataset")
     validated_maximum_obliquity = _validate_maximum_obliquity(max_obliquity)
     return bool(
-        gemmi.find_twin_laws(
-            dataset.cell,
-            dataset.spacegroup,
+        dataset.find_twin_laws(
             max_obliq=validated_maximum_obliquity,
             all_ops=False,
         )
@@ -201,12 +207,7 @@ def _validate_dataset(dataset: DataSet, *, data_key: str, name: str) -> None:
     if data_key not in dataset:
         msg = f"{name} does not contain data key {data_key!r}"
         raise PhaseAlignmentInputError(msg)
-    valid_dtypes = (
-        StructureFactorAmplitudeDtype,
-        NormalizedStructureFactorAmplitudeDtype,
-        IntensityDtype,
-    )
-    if not isinstance(dataset.dtypes[data_key], valid_dtypes):
+    if not isinstance(dataset.dtypes[data_key], REINDEXING_DATA_DTYPES):
         msg = f"{name}[{data_key!r}] must have an amplitude or intensity MTZ dtype"
         raise PhaseAlignmentInputError(msg)
     try:
@@ -231,19 +232,13 @@ def _validate_dataset(dataset: DataSet, *, data_key: str, name: str) -> None:
         raise PhaseAlignmentInputError(msg)
 
 
-def _validate_correlation_threshold(value: float, *, name: str) -> float:
-    try:
-        validated_value = float(value)
-    except (TypeError, ValueError) as error:
-        msg = f"{name} must be numeric; got {value!r}"
-        raise PhaseAlignmentInputError(msg) from error
-    if not np.isfinite(validated_value) or not -1.0 <= validated_value <= 1.0:
-        msg = f"{name} must be finite and between -1 and 1; got {value!r}"
-        raise PhaseAlignmentInputError(msg)
-    return validated_value
-
-
-def _validate_correlation_gap(value: float, *, name: str) -> float:
+def _validate_bounded_float(
+    value: float,
+    *,
+    name: str,
+    lower_bound: float,
+    upper_bound: float,
+) -> float:
     try:
         validated_value = float(value)
     except (TypeError, ValueError) as error:
@@ -251,11 +246,11 @@ def _validate_correlation_gap(value: float, *, name: str) -> float:
         raise PhaseAlignmentInputError(msg) from error
     if (
         not np.isfinite(validated_value)
-        or not 0.0 <= validated_value <= MAXIMUM_CORRELATION_GAP
+        or not lower_bound <= validated_value <= upper_bound
     ):
         msg = (
-            f"{name} must be finite and between 0 and "
-            f"{MAXIMUM_CORRELATION_GAP:g}; got {value!r}"
+            f"{name} must be finite and between {lower_bound:g} and "
+            f"{upper_bound:g}; got {value!r}"
         )
         raise PhaseAlignmentInputError(msg)
     return validated_value
@@ -268,22 +263,25 @@ def _validate_scoring_thresholds(
     minimum_correlation_gap: float,
     name_prefix: str = "",
 ) -> tuple[float, float, float]:
-    validated_warning_correlation = _validate_correlation_threshold(
-        warning_correlation,
-        name=f"{name_prefix}warning_correlation",
-    )
-    validated_minimum_correlation = _validate_correlation_threshold(
-        minimum_correlation,
-        name=f"{name_prefix}minimum_correlation",
-    )
-    validated_minimum_correlation_gap = _validate_correlation_gap(
-        minimum_correlation_gap,
-        name=f"{name_prefix}minimum_correlation_gap",
-    )
     return (
-        validated_warning_correlation,
-        validated_minimum_correlation,
-        validated_minimum_correlation_gap,
+        _validate_bounded_float(
+            warning_correlation,
+            name=f"{name_prefix}warning_correlation",
+            lower_bound=-1.0,
+            upper_bound=1.0,
+        ),
+        _validate_bounded_float(
+            minimum_correlation,
+            name=f"{name_prefix}minimum_correlation",
+            lower_bound=-1.0,
+            upper_bound=1.0,
+        ),
+        _validate_bounded_float(
+            minimum_correlation_gap,
+            name=f"{name_prefix}minimum_correlation_gap",
+            lower_bound=0.0,
+            upper_bound=MAXIMUM_CORRELATION_GAP,
+        ),
     )
 
 
@@ -326,9 +324,7 @@ def _common_finite_index(
 
 
 def _as_intensities(values: FloatArray, *, amplitude: bool) -> FloatArray:
-    if amplitude:
-        return np.asarray(values**2, dtype=np.float64)
-    return np.asarray(values, dtype=np.float64)
+    return np.asarray(values**2 if amplitude else values, dtype=np.float64)
 
 
 def _resolution_normalize(
@@ -392,11 +388,11 @@ def _score_reindexing_candidates(
     inverse_d_squared = np.asarray(d_spacings, dtype=np.float64) ** -2.0
     reference_is_amplitude = isinstance(
         reference.dtypes[reference_key],
-        (StructureFactorAmplitudeDtype, NormalizedStructureFactorAmplitudeDtype),
+        AMPLITUDE_DTYPES,
     )
     moving_is_amplitude = isinstance(
         dataset.dtypes[data_key],
-        (StructureFactorAmplitudeDtype, NormalizedStructureFactorAmplitudeDtype),
+        AMPLITUDE_DTYPES,
     )
     reference_intensities = _as_intensities(
         reference_values.loc[common_index].to_numpy(dtype=np.float64),
@@ -545,9 +541,7 @@ def reindex_by_correlation(
     )
     operations = (
         gemmi.Op(IDENTITY_OPERATION),
-        *gemmi.find_twin_laws(
-            dataset.cell,
-            dataset.spacegroup,
+        *dataset.find_twin_laws(
             max_obliq=validated_maximum_obliquity,
             all_ops=False,
         ),

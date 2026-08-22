@@ -30,6 +30,7 @@ from reciprocalspaceship.algorithms.reindexing import (
     IDENTITY_OPERATION,
     ReindexingResult,
     _as_asu,
+    _common_finite_index,
     _indexed_series,
     _score_reindexing_candidates,
     _validate_dataset,
@@ -359,6 +360,7 @@ def _origin_cosets(
     spacegroup: gemmi.SpaceGroup,
 ) -> FloatArray:
     polar_projection = polar_basis @ polar_basis.T
+    nonpolar_projection = np.eye(NUMBER_OF_CRYSTALLOGRAPHIC_AXES) - polar_projection
     centering_translations = (
         np.asarray(spacegroup.operations().cen_ops, dtype=np.float64)
         / ORIGIN_DENOMINATOR
@@ -373,9 +375,7 @@ def _origin_cosets(
                 - centering_translations[:, None, :]
                 + PERIODIC_OFFSETS[None, :, :]
             )
-            nonpolar_components = periodic_differences @ (
-                np.eye(NUMBER_OF_CRYSTALLOGRAPHIC_AXES) - polar_projection
-            )
+            nonpolar_components = periodic_differences @ nonpolar_projection
             if np.any(
                 np.linalg.norm(nonpolar_components, axis=2) < SINGULAR_VALUE_TOLERANCE
             ):
@@ -526,6 +526,8 @@ def _bounded_memory_periodic_local_maxima(
     permuted_grid_shape = tuple(grid_shape[axis] for axis in axis_order)
     permuted_frequencies = wrapped_frequencies[:, axis_order]
     slab_shape = permuted_grid_shape[1:]
+    slab_frequencies = permuted_frequencies[:, 1:]
+    inverse_axis_order = tuple(int(axis) for axis in np.argsort(axis_order))
     estimated_slab_memory = (
         int(np.prod(slab_shape, dtype=np.int64)) * FFT_SLAB_BYTES_PER_GRID_POINT
     )
@@ -535,10 +537,6 @@ def _bounded_memory_periodic_local_maxima(
     )
 
     def correlation_slab(scan_index: int) -> FloatArray:
-        slab_coefficients: ComplexArray = np.zeros(
-            slab_shape,
-            dtype=np.complex128,
-        )
         scan_axis_phases = np.exp(
             1j
             * FULL_ROTATION_RADIANS
@@ -546,17 +544,11 @@ def _bounded_memory_periodic_local_maxima(
             * scan_index
             / permuted_grid_shape[0]
         )
-        slab_frequency_indices = tuple(
-            permuted_frequencies[:, axis] for axis in range(1, len(permuted_grid_shape))
-        )
-        np.add.at(
-            slab_coefficients,
-            slab_frequency_indices,
+        return _materialized_correlation_grid(
+            slab_shape,
+            slab_frequencies,
             coefficients * scan_axis_phases,
         )
-        number_of_slab_points = int(np.prod(slab_shape, dtype=np.int64))
-        correlation = np.fft.ifftn(slab_coefficients).real * number_of_slab_points
-        return np.asarray(correlation, dtype=np.float64)
 
     number_of_slabs = permuted_grid_shape[0]
     previous_slab = correlation_slab(number_of_slabs - 1)
@@ -583,14 +575,11 @@ def _bounded_memory_periodic_local_maxima(
             )
         )
         for remaining_index in remaining_indices:
-            permuted_index: IntegerArray = np.asarray(
-                (scan_index, *(int(value) for value in remaining_index)),
-                dtype=np.int64,
+            permuted_index = (
+                scan_index,
+                *(int(value) for value in remaining_index),
             )
-            original_index: IntegerArray = np.empty_like(permuted_index)
-            for permuted_axis, original_axis in enumerate(axis_order):
-                original_index[original_axis] = permuted_index[permuted_axis]
-            index = tuple(int(value) for value in original_index)
+            index = tuple(permuted_index[axis] for axis in inverse_axis_order)
             candidate = (float(current_slab[tuple(remaining_index)]), index)
             if len(strongest_candidates) < maximum_refinement_starts:
                 heappush(strongest_candidates, candidate)
@@ -622,7 +611,8 @@ def _origin_fft_local_maxima(
         phase_differences,
         normalized_weights,
     )
-    if _estimated_fft_memory(grid_shape) <= MAXIMUM_FFT_MEMORY_BYTES:
+    estimated_memory = _estimated_fft_memory(grid_shape)
+    if estimated_memory <= MAXIMUM_FFT_MEMORY_BYTES:
         correlation_grid = _materialized_correlation_grid(
             grid_shape,
             wrapped_frequencies,
@@ -632,7 +622,7 @@ def _origin_fft_local_maxima(
         return maximum_indices[:maximum_refinement_starts], grid_shape
     if len(grid_shape) < 2:
         _raise_fft_memory_error(
-            _estimated_fft_memory(grid_shape),
+            estimated_memory,
             description="constrained origin FFT",
         )
     return (
@@ -680,6 +670,7 @@ def _rank_internal_translations(
     maximum_refinement_starts: int = DEFAULT_MAXIMUM_REFINEMENT_STARTS,
 ) -> tuple[tuple[FloatArray, float], ...]:
     polar_dimension = integer_polar_basis.shape[1]
+    floating_polar_basis = integer_polar_basis.astype(np.float64)
     if polar_dimension > 0:
         identifiable_rank = np.linalg.matrix_rank(
             miller_indices[normalized_weights > 0.0] @ integer_polar_basis,
@@ -725,7 +716,7 @@ def _rank_internal_translations(
             try:
                 translation, loss = _refine_translation(
                     starting_translation,
-                    integer_polar_basis.astype(np.float64),
+                    floating_polar_basis,
                     miller_indices,
                     phase_differences,
                     normalized_weights,
@@ -852,13 +843,10 @@ def _matched_phase_data(
         reference_fom = _indexed_series(reference_asu, data_key=reference_fom_key)
         indexed_values.extend((moving_fom, reference_fom))
 
-    common_index = indexed_values[0].index
-    for values in indexed_values[1:]:
-        common_index = common_index.intersection(values.index, sort=False)
-    finite = np.ones(len(common_index), dtype=np.bool_)
-    for values in indexed_values:
-        finite &= np.isfinite(values.loc[common_index].to_numpy(dtype=np.float64))
-    common_index = common_index[finite]
+    common_index = _common_finite_index(
+        indexed_values[0],
+        tuple(indexed_values[1:]),
+    )
     if len(common_index) < MINIMUM_PHASE_REFLECTIONS:
         msg = (
             "dataset and reference must share at least "
