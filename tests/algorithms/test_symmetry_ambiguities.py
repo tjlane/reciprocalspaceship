@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Final, TypeAlias, Union, cast
+from typing import Final, Union, cast
 
 import gemmi
 import numpy as np
 import pytest
+from typing_extensions import TypeAlias
 
 import reciprocalspaceship as rs
 
