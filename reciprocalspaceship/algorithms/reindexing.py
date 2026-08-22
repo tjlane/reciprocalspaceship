@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Final
 
 import gemmi
 import numpy as np
+import pandas as pd
+from numpy.typing import NDArray
 
 from reciprocalspaceship.algorithms._errors import (
     PhaseAlignmentInputError,
@@ -13,10 +15,19 @@ from reciprocalspaceship.algorithms._errors import (
 from reciprocalspaceship.dataset import DataSet
 
 if TYPE_CHECKING:
-    pass
+    from typing_extensions import TypeAlias
 
 
 DEFAULT_MAXIMUM_OBLIQUITY: Final[float] = 1e-6
+
+
+TARGET_REFLECTIONS_PER_RESOLUTION_BIN: Final[int] = 100
+
+
+MAXIMUM_RESOLUTION_BINS: Final[int] = 20
+
+
+FloatArray: TypeAlias = NDArray[np.float64]
 
 
 def _validate_maximum_obliquity(max_obliquity: float) -> float:
@@ -84,3 +95,74 @@ def has_reindexing_ambiguity(
             all_ops=False,
         )
     )
+
+
+def _as_asu(dataset: DataSet, operation: gemmi.Op) -> DataSet:
+    had_m_isym = "M/ISYM" in dataset
+    transformed = dataset.apply_symop(operation).hkl_to_asu()
+    if not had_m_isym and "M/ISYM" in transformed:
+        transformed.drop(columns="M/ISYM", inplace=True)
+    miller_indices = transformed.get_hkls()
+    if len(np.unique(miller_indices, axis=0)) != len(miller_indices):
+        msg = "merged data must contain unique Miller indices after mapping to the ASU"
+        raise PhaseAlignmentInputError(msg)
+    return transformed
+
+
+def _indexed_series(dataset: DataSet, *, data_key: str) -> pd.Series[float]:
+    miller_indices = dataset.get_hkls()
+    index = pd.MultiIndex.from_arrays(
+        miller_indices.T,
+        names=("H", "K", "L"),
+    )
+    return pd.Series(
+        dataset[data_key].to_numpy(dtype=np.float64),
+        index=index,
+        dtype=np.float64,
+    )
+
+
+def _common_finite_index(
+    reference_values: pd.Series[float],
+    candidate_values: tuple[pd.Series[float], ...],
+) -> pd.MultiIndex:
+    common_index = reference_values.index
+    for values in candidate_values:
+        common_index = common_index.intersection(values.index, sort=False)
+    finite = np.isfinite(reference_values.loc[common_index].to_numpy(dtype=np.float64))
+    for values in candidate_values:
+        finite &= np.isfinite(values.loc[common_index].to_numpy(dtype=np.float64))
+    return common_index[finite]
+
+
+def _as_intensities(values: FloatArray, *, amplitude: bool) -> FloatArray:
+    return np.asarray(values**2 if amplitude else values, dtype=np.float64)
+
+
+def _resolution_normalize(
+    intensities: FloatArray,
+    inverse_d_squared: FloatArray,
+) -> FloatArray:
+    number_of_bins = min(
+        MAXIMUM_RESOLUTION_BINS,
+        max(1, len(intensities) // TARGET_REFLECTIONS_PER_RESOLUTION_BIN),
+    )
+    resolution_order = np.argsort(inverse_d_squared)
+    normalized = np.empty_like(intensities, dtype=np.float64)
+    for bin_indices in np.array_split(resolution_order, number_of_bins):
+        scale = float(np.mean(intensities[bin_indices]))
+        if not np.isfinite(scale) or scale <= 0.0:
+            msg = "intensities must have a positive finite mean in every resolution bin"
+            raise PhaseAlignmentInputError(msg)
+        normalized[bin_indices] = intensities[bin_indices] / scale
+    return normalized
+
+
+def _pearson_correlation(first: FloatArray, second: FloatArray) -> float:
+    first_centered = first - np.mean(first)
+    second_centered = second - np.mean(second)
+    denominator = float(np.sqrt(np.sum(first_centered**2) * np.sum(second_centered**2)))
+    if not np.isfinite(denominator) or denominator == 0.0:
+        msg = "correlation is undefined for constant or nonfinite data"
+        raise PhaseAlignmentInputError(msg)
+    return float(first_centered @ second_centered / denominator)
